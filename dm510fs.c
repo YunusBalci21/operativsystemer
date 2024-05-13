@@ -7,6 +7,8 @@
 #include <time.h>
 #include <utime.h>
 #include <sys/types.h>
+#include <ctype.h> // For character manipulation functions - Caesar Cipher Shift
+
 
 int dm510fs_getattr( const char *, struct stat * );
 int dm510fs_readdir( const char *, void *, fuse_fill_dir_t, off_t, struct fuse_file_info * );
@@ -53,6 +55,8 @@ static struct fuse_operations dm510fs_oper = {
 #define MAX_INODES  4
 #define FS_STATE_FILE "/home/dm510/dm510/linux-6.6.9/kernel/dm510/assignment3/fs_state.dat"
   // Path to save filesystem state
+#define SHIFT_VAL 5 // Define the shift value for the Caesar Cipher
+
 
 
 /* The Inode for the filesystem*/
@@ -72,6 +76,26 @@ typedef struct Inode {
 
 // Array that represent the entire filesystem 
 Inode filesystem[MAX_INODES];
+
+// Caesar Cipher Encryption function
+void caesar_encrypt(char *data, size_t size) {
+    for (int i = 0; i < size; i++) {
+        if (isalpha(data[i])) {
+            char base = (isupper(data[i])) ? 'A' : 'a';
+            data[i] = (data[i] - base + SHIFT_VAL) % 26 + base;
+        }
+    }
+}
+
+// Caesar Cipher Decryption function
+void caesar_decrypt(char *data, size_t size) {
+    for (int i = 0; i < size; i++) {
+        if (isalpha(data[i])) {
+            char base = (isupper(data[i])) ? 'A' : 'a';
+            data[i] = (data[i] - base - SHIFT_VAL + 26) % 26 + base;
+        }
+    }
+}
 
 void save_fs_state() {
     FILE *fp = fopen(FS_STATE_FILE, "wb");
@@ -200,19 +224,41 @@ int dm510fs_open( const char *path, struct fuse_file_info *fi ) {
 int dm510fs_read( const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi ) {
     printf("read: (path=%s)\n", path);
 
-	for( int i = 0; i < MAX_INODES; i++) {
-		if( strcmp(filesystem[i].path, path) == 0 ) {
-			printf("Read: Found inode for path %s at location %i\n", path, i);
-			memcpy( buf, filesystem[i].data, filesystem[i].size );
-			return filesystem[i].size;
-		}
-	}
-	return 0;
+    for (int i = 0; i < MAX_INODES; i++) {
+        if (strcmp(filesystem[i].path, path) == 0) {
+            printf("Read: Found inode for path %s at location %i\n", path, i);
+
+            if (offset > filesystem[i].size) {
+                return 0;  // Offset is beyond the end of the file
+            }
+
+            // Calculate the number of bytes to read
+            size_t read_size = filesystem[i].size - offset;
+            if (read_size > size) {
+                read_size = size;  // Adjust read size if it exceeds the buffer size
+            }
+
+            // Copy the data from the inode to the buffer
+            memcpy(buf, filesystem[i].data + offset, read_size);
+
+            // Decrypt the data in the buffer
+            caesar_decrypt(buf, read_size);
+
+            return read_size;  // Return the number of bytes read
+        }
+    }
+    return -ENOENT;  // File not found
 }
 
 // Writes data to a file
 int dm510fs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
-    (void) fi; // If you're not using file handles.
+    (void) fi;  // If you're not using file handles.
+
+    char *encrypted_buf = malloc(size);
+    memcpy(encrypted_buf, buf, size);  // Copy the original buffer to avoid modifying it directly
+    caesar_encrypt(encrypted_buf, size);
+
+    printf("Encrypted data: %.*s\n", (int)size, encrypted_buf);  // Print the encrypted data
 
     // Find the inode corresponding to the path.
     for (int i = 0; i < MAX_INODES; i++) {
@@ -222,23 +268,34 @@ int dm510fs_write(const char *path, const char *buf, size_t size, off_t offset, 
                 size = MAX_DATA_IN_FILE - offset;
             }
             if (size == 0) {
-                return -EFBIG; // File too big.
+                free(encrypted_buf);
+                return -EFBIG;  // File too big.
             }
 
             // Perform the write operation.
-            memcpy(filesystem[i].data + offset, buf, size);
+            memcpy(filesystem[i].data + offset, encrypted_buf, size);
 
             // Update the size of the file.
             if (offset + size > filesystem[i].size) {
                 filesystem[i].size = offset + size;
             }
 
-            // Return the number of bytes written.
+            free(encrypted_buf);  // Free the encrypted buffer
             return size;
         }
     }
 
-    // If the file was not found, return an error.
+    free(encrypted_buf);  // Free the buffer if no file was found
+    return -ENOENT;
+}
+
+int dm510fs_dump_raw(const char *path) {
+    for (int i = 0; i < MAX_INODES; i++) {
+        if (filesystem[i].is_active && strcmp(filesystem[i].path, path) == 0) {
+            printf("Raw data in '%s': %.*s\n", path, (int)filesystem[i].size, filesystem[i].data);
+            return 0;
+        }
+    }
     return -ENOENT;
 }
 
